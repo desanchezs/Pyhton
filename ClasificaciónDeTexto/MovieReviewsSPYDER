@@ -1,0 +1,259 @@
+"""
+Created on Thu Nov 21 15:50:07 2019
+
+@author: deans
+"""
+import numpy as np
+import pandas as pd
+import nltk
+import tensorflow as tf
+#%%
+from nltk.stem import PorterStemmer
+from nltk.corpus import stopwords
+from sklearn.model_selection import train_test_split
+from tensorflow import keras
+from sklearn import metrics
+#%%
+nltk.download('stopwords')
+print ('Loading data')
+#%%
+file_location = 'https://gitlab.com/michaelallen1966/00_python_snippets_and_recipes/raw/master/machine_learning/data/IMDb.csv'
+
+data = pd.read_csv(file_location)
+data.columns=['text','label']
+#%%
+number_of_records = data.shape[0]
+number_to_hold_back = int(number_of_records * 0.05)
+number_to_use = number_of_records - number_to_hold_back
+data = data.head(number_to_use)
+data_held_back = data.tail(number_to_hold_back)
+
+#%%
+#Definir función para preprocesar datos
+#Esta función, como se describió anteriormente, funciona en cadenas de texto sin formato y:
+#1) cambios a minúsculas
+#2) tokeniza (se descompone en palabras
+#3) elimina la puntuación y el texto que no es de palabras
+#4) encuentra tallos de palabras
+#5) elimina las palabras de stops
+#6) se une a las palabras madre significativas
+stemming = PorterStemmer()
+stops = set(stopwords.words("english"))
+
+def apply_cleaning_function_to_list(X):
+    cleaned_X = []
+    for element in X:
+        cleaned_X.append(clean_text(element))
+    return cleaned_X
+#%%
+def clean_text(raw_text):
+    """This function works on a raw text string, and:
+        1) changes to lower case
+        2) tokenizes (breaks text down into a list of words)
+        3) removes punctuation and non-word text
+        4) finds word stems
+        5) removes stop words
+        6) rejoins meaningful stem words"""
+    
+    text = raw_text.lower()
+    tokens = nltk.word_tokenize(text)
+    token_words = [w for w in tokens if w.isalpha()]
+    stemmed_words = [stemming.stem(w) for w in token_words]
+    meaningful_words = [w for w in stemmed_words if not w in stops]
+    return meaningful_words
+#%%
+# Obtener texto para limpiar
+text_to_clean = list(data['text'])
+# Limpiar texto y agregar a datos
+data['cleaned_text'] = apply_cleaning_function_to_list(text_to_clean)
+#%%
+
+#Funcion para convertir texto en números. El texto debe ser tokenzied para que la prueba se 
+# presente como una lista de palabras. El número de índice para una palabra se basa en 
+#  su frecuencia (las palabras que ocurren con mayor frecuencia tienen un índice más bajo). 
+#  Si una palabra no ocurre tantas veces como cutoff_for_rare_words, entonces se le da un 
+#  índice de palabras de cero. Todas las palabras raras serán cero.
+
+def training_text_to_numbers(text, cutoff_for_rare_words = 1):
+     # Acoplar la lista si hay sublistas presentes
+    if len(text) > 1:
+        flat_text = [item for sublist in text for item in sublist]
+    else:
+        flat_text = text
+    # obtener frecuencia de palabras
+    fdist = nltk.FreqDist(flat_text)
+    # Convert to Pandas dataframe
+    df_fdist = pd.DataFrame.from_dict(fdist, orient='index')
+    df_fdist.columns = ['Frequency']
+    # Ordenar por frecuencia de palabra
+    df_fdist.sort_values(by=['Frequency'], ascending=False, inplace=True)
+    # Agregar índice de palabras
+    number_of_words = df_fdist.shape[0]
+    df_fdist['word_index'] = list(np.arange(number_of_words)+1)
+    # Convertir pandas a diccionario
+    word_dict = df_fdist['word_index'].to_dict()
+    # Use el diccionario para convertir palabras en texto a números
+    text_numbers = []
+    for string in text:
+        string_numbers = [word_dict[word] for word in string]
+        text_numbers.append(string_numbers)
+    
+    return (text_numbers, df_fdist)
+# Call function to convert training text to numbers
+print ('Convert text to numbers')
+numbered_text, dict_df = \
+    training_text_to_numbers(data['cleaned_text'].values)
+#%%
+# Mantenga solo las frecuencias de palabras del 1 al 10000
+def limit_word_count(numbered_text):
+    max_word_count = 10000
+    filtered_text = []
+    for number_list in numbered_text:
+        filtered_line = \
+            [number for number in number_list if number <=max_word_count]
+        filtered_text.append(filtered_line)
+        
+    return filtered_text
+    
+data['numbered_text'] = limit_word_count(numbered_text)
+
+#Marco de datos Pickle y marco de datos de diccionario (para uso posterior si es necesario)
+data.to_pickle('data_numbered.p')
+dict_df.to_pickle('data_dictionary_dataframe.p')
+#%%
+X = list(data.numbered_text.values)
+y = data.label.values
+#%%
+## HAGA TODOS LOS DATOS X LA MISMA LONGITUD
+# Usaremos keras para hacer que todos los datos X tengan una longitud de 512.
+# Los datos más cortos se rellenarán con 0, los datos más largos se truncarán.
+# Obviamente hemos mantenido el valor cero libre de uso.
+processed_X = \
+    keras.preprocessing.sequence.pad_sequences(X,
+                                               value=0,
+                                               padding='post',
+                                               maxlen=512)
+
+##Dividir datos en conjuntos de entrenamiento y prueba
+X_train, X_test, y_train, y_test=train_test_split(
+        processed_X,y,test_size=0.2,random_state=999)
+#%%
+#Las capas se apilan secuencialmente para construir el clasificador:
+#
+# La primera capa es una capa de incrustación. Esta capa toma el vocabulario codificado 
+#con enteros y busca el vector de incrustación para cada índice de palabras. 
+#Estos vectores se aprenden a medida que el modelo entrena. Los vectores agregan una dimensión 
+#a la matriz de salida. Las dimensiones resultantes son: (lote, secuencia, incrustación).
+#
+# A continuación, una capa GlobalAveragePooling1D devuelve un vector de salida de longitud 
+#fija para cada ejemplo promediando la dimensión de secuencia. Esto permite que el modelo 
+#maneje la entrada de longitud variable, de la manera más simple posible.
+# #
+# Este vector de salida de longitud fija se canaliza a través de una capa completamente 
+#conectada (Densa) con 16 unidades ocultas. La última capa está densamente conectada con un solo nodo de salida. Usando la función de activación sigmoidea, este valor es un valor flotante entre 0 y 1, que representa una probabilidad o nivel de confianza.
+# Los reguladores ayudan a prevenir el ajuste excesivo. El sobreajuste es evidente cuando 
+#el ajuste de los datos de entrenamiento es significativamente mejor que el ajuste de los 
+#datos de prueba. El nivel y el tipo pueden ajustarse para maximizar la precisión de la 
+#prueba
+
+
+#Aquí construimos una red neuronal de cuatro capas con keras / tensorflow. 
+#La primera capa es la capa de entrada, luego tenemos dos capas ocultas y una capa de salida.
+
+# forma de entrada es el recuento de vocabulario utilizado para la conversión de texto a número
+# (10,000 palabras más uno para nuestro relleno cero)
+vocab_size = 10001
+model = keras.Sequential()
+model.add(keras.layers.Embedding(vocab_size, 16))        
+model.add(keras.layers.GlobalAveragePooling1D())
+model.add(keras.layers.Dense(16, activation=tf.nn.relu, 
+                             kernel_regularizer=keras.regularizers.l2(0.01)))
+model.add(keras.layers.Dense(1, activation=tf.nn.sigmoid,
+                             kernel_regularizer=keras.regularizers.l2(0.01)))
+model.summary()
+#%%
+# CONFIGURAR OPTIMIZADOR
+model.compile(optimizer='adam',
+              loss='binary_crossentropy',
+              metrics=['accuracy'])
+#%%
+"""
+Aquí entrenamos al modelo. Usar más épocas puede dar una mayor precisión.
+
+En la `` vida real '', es posible que desee retener otros datos de prueba (por ejemplo, 
+el 10% de los datos originales para que pueda usar el
+conjunto de prueba aquí para ayudar a optimizar los parámetros de red neutrales y 
+luego probar el modelo final en un conjunto de datos independiente.
+Cuando verbose se establece en 1, el modelo mostrará la precisión y la pérdida de los 
+conjuntos de datos de entrenamiento y prueba.
+
+"""
+# Train model (detallado = 1 muestra el progreso del entrenamiento)
+model.fit(X_train,
+          y_train,
+          epochs=100,
+          batch_size=512,
+          validation_data=(X_test, y_test),
+          verbose=1)
+results = model.evaluate(X_train, y_train)
+print('\nTraining accuracy:', results[1])
+
+results = model.evaluate(X_test, y_test)
+print('\nTest accuracy:', results[1])
+
+#%%
+"""
+Aquí hacemos predicciones del texto que nunca antes se ha aplicado. 
+Como estamos utilizando datos que se han retenido, también podemos verificar 
+su precisión con una etiqueta conocida
+"""
+text_to_clean = list(data_held_back['text'].values)
+X_clean = apply_cleaning_function_to_list(text_to_clean)
+ 
+# Ahora necesitamos convertir palabras en números.
+# Como se trata de datos nuevos, es posible que la palabra no se reconozca, por lo que verificaremos 
+# que la palabra esté en el diccionario
+# Convert pandas dataframe to dictionary
+word_dict = dict_df['word_index'].to_dict()
+
+# Use el diccionario para convertir palabras en texto a números
+text_numbers = []
+for string in X_clean:
+    string_numbers = []
+    for word in string:
+        if word in word_dict:
+            string_numbers.append(word_dict[word])
+    text_numbers.append(string_numbers)
+
+text_numbers = limit_word_count(text_numbers)
+
+# Proceso en matrices de longitud fija
+    
+processed_X = \
+    keras.preprocessing.sequence.pad_sequences(text_numbers,
+                                               value=0,
+                                               padding='post',
+                                               maxlen=512)
+#%%
+#Obtener predicción
+predicted_classes = model.predict_classes(processed_X)
+# Las clases predichas dan 0/1 para cada clase posible. Como solo tenemos una 
+#clase, necesitamos 'aplanar' esta matriz para eliminar el anidamiento
+predicted_classes = predicted_classes.flatten()
+
+# Verifique la predicción con la etiqueta conocida
+actual_classes = data_held_back['label'].values
+accurate_prediction = predicted_classes == actual_classes
+accuracy = accurate_prediction.mean()
+print ('Accuracy on unseen data: %.2f' %accuracy)
+#%%
+pred = predicted_classes
+cm=metrics.confusion_matrix(actual_classes,pred)
+print(cm)
+#%%
+
+df_cm = pd.DataFrame(cm, range(2), range(2))
+sn.set(font_scale=1)#for label size
+sn.heatmap(df_cm, annot=True,annot_kws={"size": 16})# font size
+
+plt.show()
